@@ -5,6 +5,7 @@
 
 const crypto = require('crypto');
 const jwt = require('jsonwebtoken');
+const xss = require('xss');
 const config = require('../config/env');
 const { logger } = require('../config/logger');
 
@@ -203,21 +204,19 @@ class CryptoManager {
  */
 class ValidationManager {
   /**
-   * Sanitize HTML input
+   * Sanitize HTML input using robust XSS library
    * @param {string} input - Input to sanitize
    * @returns {string} Sanitized input
    */
   static sanitizeHtml(input) {
     if (typeof input !== 'string') return input;
     
-    return input
-      .replace(/&/g, '&')
-      .replace(/</g, '<')
-      .replace(/>/g, '>')
-      .replace(/"/g, '"')
-      .replace(/'/g, ''')
-      )
-      .replace(/\//g, '/');
+    // Use xss library for robust HTML sanitization
+    return xss(input, {
+      whiteList: {}, // No HTML tags allowed
+      stripIgnoreTag: true,
+      stripIgnoreTagBody: ['script']
+    });
   }
 
   /**

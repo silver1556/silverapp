@@ -19,6 +19,7 @@
   },
   "dependencies": {
     "@alicloud/pop-core": "^1.7.12",
+    "@rate-limit/redis": "^1.0.2",
     "ali-oss": "^6.18.1",
     "apn": "^3.0.0",
     "axios": "^1.6.2",
@@ -30,7 +31,6 @@
     "dotenv": "^16.5.0",
     "express": "^4.21.2",
     "express-rate-limit": "^7.5.0",
-    "express-rate-limit-redis": "^0.0.4",
     "helmet": "^8.1.0",
     "hpp": "^0.2.3",
     "joi": "^17.11.0",
@@ -45,9 +45,11 @@
     "redis": "^5.5.6",
     "sequelize": "^6.37.7",
     "socket.io": "^4.7.5",
+    "socket.io-redis": "^6.1.1",
     "tencentcloud-sdk-nodejs": "^4.0.758",
     "winston": "^3.17.0",
     "xml2js": "^0.6.2",
+    "xss": "^1.0.15",
     "xss-clean": "^0.1.4"
   },
   "devDependencies": {

@@ -1,9 +1,11 @@
 /**
  * Socket.IO Service
  * Handles real-time communication for chat, notifications, and live updates
+ * Enhanced with Redis adapter for horizontal scaling
  */
 
 const { Server } = require('socket.io');
+const { createAdapter } = require('socket.io-redis');
 const jwt = require('jsonwebtoken');
 const config = require('../config/env');
 const { logger } = require('../config/logger');
@@ -16,13 +18,11 @@ const { TokenManager } = require('../utils/security');
 class SocketService {
   constructor() {
     this.io = null;
-    this.connectedUsers = new Map(); // userId -> Set of socketIds
-    this.socketUsers = new Map(); // socketId -> userId
-    this.rooms = new Map(); // roomId -> Set of socketIds
+    this.redisAdapter = null;
   }
 
   /**
-   * Initialize Socket.IO server
+   * Initialize Socket.IO server with Redis adapter for scaling
    * @param {Object} server - HTTP server instance
    */
   initialize(server) {
@@ -39,10 +39,37 @@ class SocketService {
       pingInterval: 25000
     });
 
+    // Setup Redis adapter for horizontal scaling
+    this.setupRedisAdapter();
     this.setupMiddleware();
     this.setupEventHandlers();
     
-    logger.info('Socket.IO service initialized');
+    logger.info('Socket.IO service initialized with Redis adapter for scaling');
+  }
+
+  /**
+   * Setup Redis adapter for horizontal scaling
+   */
+  setupRedisAdapter() {
+    try {
+      if (redisService.isReady()) {
+        // Create Redis adapter for Socket.IO clustering
+        this.redisAdapter = createAdapter({
+          host: config.redis.host,
+          port: config.redis.port,
+          password: config.redis.password,
+          db: config.redis.db
+        });
+
+        this.io.adapter(this.redisAdapter);
+        logger.info('Socket.IO Redis adapter configured for horizontal scaling');
+      } else {
+        logger.warn('Redis not available - Socket.IO will run in single-instance mode');
+      }
+    } catch (error) {
+      logger.error('Failed to setup Redis adapter for Socket.IO:', error);
+      logger.warn('Socket.IO will run in single-instance mode');
+    }
   }
 
   /**
@@ -105,17 +132,10 @@ class SocketService {
     try {
       const userId = socket.userId;
       
-      // Add user to connected users map
-      if (!this.connectedUsers.has(userId)) {
-        this.connectedUsers.set(userId, new Set());
-      }
-      this.connectedUsers.get(userId).add(socket.id);
-      this.socketUsers.set(socket.id, userId);
-      
       // Join user to their personal room
       socket.join(`user:${userId}`);
       
-      // Update user online status
+      // Update user online status in Redis (distributed state)
       await this.updateUserOnlineStatus(userId, true);
       
       // Notify friends about online status
@@ -140,19 +160,14 @@ class SocketService {
       const userId = socket.userId;
       
       if (userId) {
-        // Remove socket from user's connections
-        if (this.connectedUsers.has(userId)) {
-          this.connectedUsers.get(userId).delete(socket.id);
-          
-          // If no more connections for this user, mark as offline
-          if (this.connectedUsers.get(userId).size === 0) {
-            this.connectedUsers.delete(userId);
-            await this.updateUserOnlineStatus(userId, false);
-            await this.notifyFriendsStatusChange(userId, 'offline');
-          }
-        }
+        // Check if user has other active connections using Redis
+        const activeConnections = await this.getUserActiveConnections(userId);
         
-        this.socketUsers.delete(socket.id);
+        // If no more connections, mark as offline
+        if (activeConnections <= 1) {
+          await this.updateUserOnlineStatus(userId, false);
+          await this.notifyFriendsStatusChange(userId, 'offline');
+        }
         
         logger.info(`User ${userId} disconnected socket ${socket.id}`);
       }
@@ -172,12 +187,6 @@ class SocketService {
       const roomId = `conversation:${conversationId}`;
       
       socket.join(roomId);
-      
-      // Add to rooms map
-      if (!this.rooms.has(roomId)) {
-        this.rooms.set(roomId, new Set());
-      }
-      this.rooms.get(roomId).add(socket.id);
       
       logger.debug(`User ${socket.userId} joined conversation ${conversationId}`);
       
@@ -204,14 +213,6 @@ class SocketService {
       const roomId = `conversation:${conversationId}`;
       
       socket.leave(roomId);
-      
-      // Remove from rooms map
-      if (this.rooms.has(roomId)) {
-        this.rooms.get(roomId).delete(socket.id);
-        if (this.rooms.get(roomId).size === 0) {
-          this.rooms.delete(roomId);
-        }
-      }
       
       logger.debug(`User ${socket.userId} left conversation ${conversationId}`);
       
@@ -418,24 +419,76 @@ class SocketService {
   }
 
   /**
-   * Check if user is online
+   * Check if user is online using Redis (distributed state)
    * @param {string} userId - User ID
-   * @returns {boolean} Online status
+   * @returns {Promise<boolean>} Online status
    */
-  isUserOnline(userId) {
-    return this.connectedUsers.has(userId) && this.connectedUsers.get(userId).size > 0;
+  async isUserOnline(userId) {
+    try {
+      if (!redisService.isReady()) {
+        // Fallback to local check if Redis is not available
+        return this.io.sockets.adapter.rooms.has(`user:${userId}`);
+      }
+
+      const key = `user_status:${userId}`;
+      const status = await redisService.get(key, true);
+      return status && status.isOnline;
+    } catch (error) {
+      logger.error('Error checking user online status:', error);
+      return false;
+    }
   }
 
   /**
-   * Get online users count
-   * @returns {number} Number of online users
+   * Get online users count using Redis
+   * @returns {Promise<number>} Number of online users
    */
-  getOnlineUsersCount() {
-    return this.connectedUsers.size;
+  async getOnlineUsersCount() {
+    try {
+      if (!redisService.isReady()) {
+        return this.io.sockets.sockets.size;
+      }
+
+      const keys = await redisService.client.keys('user_status:*');
+      let onlineCount = 0;
+
+      for (const key of keys) {
+        const status = await redisService.get(key, true);
+        if (status && status.isOnline) {
+          onlineCount++;
+        }
+      }
+
+      return onlineCount;
+    } catch (error) {
+      logger.error('Error getting online users count:', error);
+      return 0;
+    }
   }
 
   /**
-   * Update user online status in Redis
+   * Get user active connections count
+   * @param {string} userId - User ID
+   * @returns {Promise<number>} Number of active connections
+   */
+  async getUserActiveConnections(userId) {
+    try {
+      if (!redisService.isReady()) {
+        const userRoom = this.io.sockets.adapter.rooms.get(`user:${userId}`);
+        return userRoom ? userRoom.size : 0;
+      }
+
+      const key = `user_connections:${userId}`;
+      const connections = await redisService.get(key, true);
+      return connections ? connections.count : 0;
+    } catch (error) {
+      logger.error('Error getting user active connections:', error);
+      return 0;
+    }
+  }
+
+  /**
+   * Update user online status in Redis (distributed state)
    * @param {string} userId - User ID
    * @param {boolean} isOnline - Online status
    * @param {string} status - Detailed status
@@ -448,13 +501,26 @@ class SocketService {
       const statusData = {
         isOnline,
         status,
-        lastSeen: new Date().toISOString()
+        lastSeen: new Date().toISOString(),
+        serverId: process.env.SERVER_ID || 'default'
       };
 
       if (isOnline) {
         await redisService.set(key, statusData, 3600); // 1 hour TTL
+        
+        // Track connection count
+        const connectionKey = `user_connections:${userId}`;
+        await redisService.incr(connectionKey);
+        await redisService.expire(connectionKey, 3600);
       } else {
         await redisService.set(key, statusData, 86400); // 24 hours TTL for offline status
+        
+        // Decrement connection count
+        const connectionKey = `user_connections:${userId}`;
+        const count = await redisService.decr(connectionKey);
+        if (count <= 0) {
+          await redisService.del(connectionKey);
+        }
       }
     } catch (error) {
       logger.error('Error updating user online status:', error);
@@ -543,14 +609,17 @@ class SocketService {
 
   /**
    * Get socket service statistics
-   * @returns {Object} Service statistics
+   * @returns {Promise<Object>} Service statistics
    */
-  getStats() {
+  async getStats() {
+    const onlineUsers = await this.getOnlineUsersCount();
+    
     return {
-      connectedUsers: this.connectedUsers.size,
-      totalSockets: this.socketUsers.size,
-      activeRooms: this.rooms.size,
-      uptime: process.uptime()
+      connectedUsers: onlineUsers,
+      totalSockets: this.io.sockets.sockets.size,
+      uptime: process.uptime(),
+      redisAdapter: !!this.redisAdapter,
+      scalable: !!this.redisAdapter
     };
   }
 }

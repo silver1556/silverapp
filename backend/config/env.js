@@ -111,10 +111,13 @@ const config = {
       connectTimeout: 60000,
       acquireTimeout: 60000,
       timeout: 60000,
-      // SSL configuration for cloud databases
+      // SSL configuration for cloud databases - SECURE CONFIGURATION
       ssl: process.env.NODE_ENV === 'production' ? {
         require: true,
-        rejectUnauthorized: false
+        rejectUnauthorized: true, // FIXED: Enable strict certificate validation
+        ca: process.env.DB_SSL_CA ? fs.readFileSync(process.env.DB_SSL_CA) : undefined,
+        cert: process.env.DB_SSL_CERT ? fs.readFileSync(process.env.DB_SSL_CERT) : undefined,
+        key: process.env.DB_SSL_KEY ? fs.readFileSync(process.env.DB_SSL_KEY) : undefined
       } : false
     }
   },
